@@ -23,7 +23,7 @@ if(stills){
 const outf=arg('--out',path.join(ROOT,'out/recursion_v2_9x16.mp4')), audio=arg('--audio',path.join(ROOT,'out/recursion_v2_audio.wav'));
 const fa=['-y','-loglevel','error','-f','image2pipe','-framerate',String(FPS),'-c:v','mjpeg','-i','-'];
 const hasA=fs.existsSync(audio)&&from===0&&to===20;if(hasA)fa.push('-i',audio);
-fa.push('-vf','scale=1080:1920:flags=lanczos','-c:v','libx264','-preset','slow','-crf','16','-pix_fmt','yuv420p','-profile:v','high','-r',String(FPS));
+fa.push('-vf','scale=1080:1920:flags=lanczos','-c:v','libx264','-preset','slow','-crf','20','-maxrate','14M','-bufsize','28M','-pix_fmt','yuv420p','-profile:v','high','-r',String(FPS));
 if(hasA)fa.push('-c:a','aac','-b:a','192k','-shortest');fa.push('-movflags','+faststart',outf);
 const ff=spawn(FF,fa,{stdio:['pipe','inherit','inherit']});const done=new Promise(r=>ff.on('close',r));
 const t0=Date.now(),f0=Math.round(from*FPS),f1=Math.round(to*FPS);

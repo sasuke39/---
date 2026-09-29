@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>递归 RECURSION v3</title>
+<link rel="stylesheet" href="fonts/fonts.css">
+<style>
+  html,body{margin:0;height:100%;background:#000;display:flex;align-items:center;justify-content:center;overflow:hidden}
+  #out{height:100vh;max-width:100vw;aspect-ratio:9/16}
+  #gl{display:none}
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<canvas id="out" width="1080" height="1920"></canvas>
+<script src="timeline.js"></script>
+<script>
+/* v3：一个连续镜头。每帧由 scaleAt(T) 给出“每屏幕单位多少米”(S)，
+   各尺度图层用真实米制单位建模，按 E/S 计算内嵌半径逐层合成，然后统一做后期。 */
+const W=1080,H=1920;
+const q=new URLSearchParams(location.search);
+const SCALE=parseFloat(q.get('scale')||'1');
+const RW=Math.round(W*SCALE),RH=Math.round(H*SCALE);
+const glc=document.getElementById('gl');glc.width=RW;glc.height=RH;
+const gl=glc.getContext('webgl2',{preserveDrawingBuffer:true,antialias:false});
+gl.getExtension('EXT_color_buffer_float');gl.getExtension('OES_texture_float_linear');
+const out=document.getElementById('out'),o2=out.getContext('2d');
+function load(url){const x=new XMLHttpRequest();x.open('GET',url,false);x.overrideMimeType('text/plain');x.send();return x.responseText}
+const COMMON=load('common.glsl');
+function compile(src){
+  const vs=gl.createShader(gl.VERTEX_SHADER);gl.shaderSource(vs,'#version 300 es\nin vec2 p;void main(){gl_Position=vec4(p,0,1);}');gl.compileShader(vs);
+  const fs=gl.createShader(gl.FRAGMENT_SHADER);gl.shaderSource(fs,'#version 300 es\nprecision highp float;\n'+COMMON+'\n'+src);gl.compileShader(fs);
+  if(!gl.getShaderParameter(fs,gl.COMPILE_STATUS))throw new Error(gl.getShaderInfoLog(fs));
+  const pr=gl.createProgram();gl.attachShader(pr,vs);gl.attachShader(pr,fs);gl.bindAttribLocation(pr,0,'p');gl.linkProgram(pr);
+  if(!gl.getProgramParameter(pr,gl.LINK_STATUS))throw new Error(gl.getProgramInfoLog(pr));
+  const u={};const n=gl.getProgramParameter(pr,gl.ACTIVE_UNIFORMS);for(let i=0;i<n;i++){const a=gl.getActiveUniform(pr,i);u[a.name]=gl.getUniformLocation(pr,a.name)}
+  return{pr,u}}
+const vb=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,vb);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,3,-1,-1,3]),gl.STATIC_DRAW);
+gl.enableVertexAttribArray(0);gl.vertexAttribPointer(0,2,gl.FLOAT,false,0,0);
+function target(){const t=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,t);
+  const lv=Math.floor(Math.log2(Math.max(RW,RH)))+1;gl.texStorage2D(gl.TEXTURE_2D,lv,gl.RGBA16F,RW,RH);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR_MIPMAP_LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+  const f=gl.createFramebuffer();gl.bindFramebuffer(gl.FRAMEBUFFER,f);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,t,0);return{t,f}}
+const TX=[0,1,2,3,4,5].map(()=>target());
+const POST=compile(load('post.glsl')),NEST=compile(load('nest.glsl'));
+const progs={};function prog(name){return progs[name]||(progs[name]=compile(load('layers/'+name+'.glsl')))}
+function setU(P,T,S,prm){gl.uniform2f(P.u.uRes,RW,RH);if(P.u.uT)gl.uniform1f(P.u.uT,T);if(P.u.uS)gl.uniform1f(P.u.uS,S);
+  if(P.u.uLT)gl.uniform1f(P.u.uLT,T);if(P.u.uP)gl.uniform1f(P.u.uP,0);
+  for(const k of ['A','B','C','D','E','F'])if(P.u['u'+k])gl.uniform1f(P.u['u'+k],prm[k]??0)}
+function drawLayer(L,T,S,tgt){const P=prog(L.name);gl.useProgram(P.pr);gl.bindFramebuffer(gl.FRAMEBUFFER,tgt.f);gl.viewport(0,0,RW,RH);
+  setU(P,T,S,L.params?L.params(T,S):{});gl.drawArrays(gl.TRIANGLES,0,3)}
+function nest(a,b,R,alpha,tgt){gl.useProgram(NEST.pr);gl.bindFramebuffer(gl.FRAMEBUFFER,tgt.f);gl.viewport(0,0,RW,RH);
+  gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,a.t);gl.uniform1i(NEST.u.uTa,0);
+  gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_2D,b.t);gl.uniform1i(NEST.u.uTb,1);gl.activeTexture(gl.TEXTURE0);
+  gl.uniform2f(NEST.u.uRes,RW,RH);gl.uniform1f(NEST.u.uR,R);gl.uniform1f(NEST.u.uAlpha,alpha);gl.drawArrays(gl.TRIANGLES,0,3)}
+
+// 渲染某个尺度下的完整画面到目标纹理，返回使用的纹理
+function composeAt(T,S,slot){
+  // LAYERS 按 E 从小到大（内→外）
+  const act=[];for(let i=0;i<LAYERS.length;i++){const L=LAYERS[i];const R=L.E/S;const innerR=i>0?LAYERS[i-1].E/S:0;
+    if(R>.004&&(i===0||innerR<1.25))act.push(L)}
+  let acc=TX[slot*3],tmp=TX[slot*3+1];const lt=TX[slot*3+2];
+  const outer=act[act.length-1];drawLayer(outer,T,S,acc);
+  for(let j=act.length-2;j>=0;j--){const L=act[j];drawLayer(L,T,S,lt);nest(acc,lt,L.E/S,L.fade?L.fade(S):1,tmp);const s=acc;acc=tmp;tmp=s}
+  return acc}
+function renderFrame(T){
+  const S=scaleAt(T);let res=composeAt(T,S,0),mix=0,res2=null;
+  const mo=morphAt(T); // 结尾：星系 → 眼睛
+  if(mo.m>0){res2=composeAt(T,mo.S2,1);mix=mo.m}
+  for(const r of [res,res2])if(r){gl.bindTexture(gl.TEXTURE_2D,r.t);gl.generateMipmap(gl.TEXTURE_2D)}
+  gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.viewport(0,0,RW,RH);gl.useProgram(POST.pr);
+  gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,res.t);gl.uniform1i(POST.u.uTa,0);
+  gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_2D,(res2||res).t);gl.uniform1i(POST.u.uTb,1);gl.activeTexture(gl.TEXTURE0);
+  gl.uniform2f(POST.u.uRes,RW,RH);gl.uniform1f(POST.u.uT,T);gl.uniform1f(POST.u.uMix,mix);gl.uniform1f(POST.u.uExpo,expoAt(T));gl.uniform1f(POST.u.uFlash,0);
+  if(POST.u.uMorphR)gl.uniform1f(POST.u.uMorphR,mo.m);
+  gl.drawArrays(gl.TRIANGLES,0,3);
+  o2.drawImage(glc,0,0,W,H);overlay(o2,T,S);
+}
+window.renderFrame=renderFrame;window.scaleAt=scaleAt;
+window.frameJPEG=(T,qq=.94)=>{renderFrame(T);gl.finish();return out.toDataURL('image/jpeg',qq).split(',')[1]};
+window.framePNG=T=>{renderFrame(T);gl.finish();return out.toDataURL('image/png').split(',')[1]};
+(async()=>{try{await document.fonts.load('700 60px "Noto Serif SC"','是我们创造了它还是梦见');await document.fonts.ready}catch(e){}
+  for(const L of LAYERS)prog(L.name);window.READY=true;
+  if(q.has('render'))return;
+  let t0=performance.now();const tick=()=>{renderFrame(((performance.now()-t0)/1000)%DUR);requestAnimationFrame(tick)};tick()})();
+</script>
+</body>
+</html>
