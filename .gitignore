@@ -1,0 +1,4 @@
+out/stills/
+out/sheet*.png
+out/render.log
+node_modules/
