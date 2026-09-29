@@ -2,3 +2,6 @@ out/stills/
 out/sheet*.png
 out/render.log
 node_modules/
+out/v2stills/
+out/v2sheet.png
+out/render_v2.log

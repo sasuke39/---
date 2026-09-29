@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>递归 RECURSION v2</title>
+<style>
+  html,body{margin:0;height:100%;background:#000;display:flex;align-items:center;justify-content:center;overflow:hidden}
+  #out{height:100vh;max-width:100vw;aspect-ratio:9/16}
+  #gl{display:none}
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<canvas id="out" width="1080" height="1920"></canvas>
+<link rel="stylesheet" href="fonts/fonts.css">
+<script src="timeline.js"></script>
+<script>
+/* 写实版渲染器：每个镜头是一个 GLSL 片元着色器（光线步进 / 体积 / 程序化材质），
+   输出 HDR → 后期（泛光、ACES、色差、暗角、颗粒）→ 2D 画布叠加字幕。
+   window.frameJPEG(T) 供离线渲染逐帧调用。 */
+const W=1080,H=1920;
+const q=new URLSearchParams(location.search);
+const SCALE=parseFloat(q.get('scale')||'1');            // 渲染分辨率缩放（预览可用 0.5）
+const RW=Math.round(W*SCALE),RH=Math.round(H*SCALE);
+const glc=document.getElementById('gl');glc.width=RW;glc.height=RH;
+const gl=glc.getContext('webgl2',{preserveDrawingBuffer:true,antialias:false});
+gl.getExtension('EXT_color_buffer_float');gl.getExtension('OES_texture_float_linear');
+const out=document.getElementById('out'),o2=out.getContext('2d');
+
+function load(url){const x=new XMLHttpRequest();x.open('GET',url,false);x.overrideMimeType('text/plain');x.send();return x.responseText}
+const COMMON=load('common.glsl');
+function compile(src){
+  const vs=gl.createShader(gl.VERTEX_SHADER);gl.shaderSource(vs,'#version 300 es\nin vec2 p;void main(){gl_Position=vec4(p,0,1);}');gl.compileShader(vs);
+  const fs=gl.createShader(gl.FRAGMENT_SHADER);gl.shaderSource(fs,'#version 300 es\nprecision highp float;\n'+COMMON+'\n'+src);gl.compileShader(fs);
+  if(!gl.getShaderParameter(fs,gl.COMPILE_STATUS))throw new Error(gl.getShaderInfoLog(fs));
+  const pr=gl.createProgram();gl.attachShader(pr,vs);gl.attachShader(pr,fs);gl.bindAttribLocation(pr,0,'p');gl.linkProgram(pr);
+  if(!gl.getProgramParameter(pr,gl.LINK_STATUS))throw new Error(gl.getProgramInfoLog(pr));
+  const u={};const n=gl.getProgramParameter(pr,gl.ACTIVE_UNIFORMS);for(let i=0;i<n;i++){const a=gl.getActiveUniform(pr,i);u[a.name]=gl.getUniformLocation(pr,a.name)}
+  return{pr,u}}
+const vb=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,vb);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,3,-1,-1,3]),gl.STATIC_DRAW);
+gl.enableVertexAttribArray(0);gl.vertexAttribPointer(0,2,gl.FLOAT,false,0,0);
+
+function target(){const t=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,t);
+  const lv=Math.floor(Math.log2(Math.max(RW,RH)))+1;gl.texStorage2D(gl.TEXTURE_2D,lv,gl.RGBA16F,RW,RH);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR_MIPMAP_LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+  const f=gl.createFramebuffer();gl.bindFramebuffer(gl.FRAMEBUFFER,f);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,t,0);return{t,f}}
+const TA=target(),TB=target();
+const POST=compile(load('post.glsl'));
+const progs={};
+function prog(name){return progs[name]||(progs[name]=compile(load('shots/'+name+'.glsl')))}
+
+function drawShot(sh,T,tgt){
+  const lt=T-sh.t0,p=Math.min(1,Math.max(0,lt/(sh.t1-sh.t0)));
+  const P=prog(sh.name);gl.useProgram(P.pr);gl.bindFramebuffer(gl.FRAMEBUFFER,tgt.f);gl.viewport(0,0,RW,RH);
+  gl.uniform2f(P.u.uRes,RW,RH);gl.uniform1f(P.u.uT,T);gl.uniform1f(P.u.uLT,lt);gl.uniform1f(P.u.uP,p);
+  const prm=sh.params?sh.params(T,lt,p):{};for(const k of ['A','B','C','D','E','F'])if(P.u['u'+k])gl.uniform1f(P.u['u'+k],prm[k]??0);
+  gl.drawArrays(gl.TRIANGLES,0,3);gl.bindTexture(gl.TEXTURE_2D,tgt.t);gl.generateMipmap(gl.TEXTURE_2D);
+  return prm}
+
+function renderFrame(T){
+  const act=SHOTS.filter(s=>T>=s.t0&&T<s.t1+(s.xout||0));
+  const a=act[0],b=act[1];
+  const pa=drawShot(a,T,TA);let mix=0,pb={};
+  if(b){pb=drawShot(b,T,TB);mix=Math.min(1,Math.max(0,(T-b.t0)/Math.max(1e-3,a.t1+(a.xout||0)-b.t0)));mix=mix*mix*(3-2*mix)}
+  gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.viewport(0,0,RW,RH);gl.useProgram(POST.pr);
+  gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,TA.t);gl.uniform1i(POST.u.uTa,0);
+  gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_2D,TB.t);gl.uniform1i(POST.u.uTb,1);gl.activeTexture(gl.TEXTURE0);
+  gl.uniform2f(POST.u.uRes,RW,RH);gl.uniform1f(POST.u.uT,T);gl.uniform1f(POST.u.uMix,mix);
+  gl.uniform1f(POST.u.uExpo,lerpN(pa.expo??1,pb.expo??1,mix));gl.uniform1f(POST.u.uFlash,flashAt(T));
+  gl.drawArrays(gl.TRIANGLES,0,3);
+  o2.drawImage(glc,0,0,W,H);
+  overlay(o2,T);
+}
+const lerpN=(a,b,t)=>a+(b-a)*t;
+window.renderFrame=renderFrame;
+window.frameJPEG=(T,qq=.94)=>{renderFrame(T);gl.finish();return out.toDataURL('image/jpeg',qq).split(',')[1]};
+window.framePNG=T=>{renderFrame(T);gl.finish();return out.toDataURL('image/png').split(',')[1]};
+(async()=>{try{await document.fonts.load('700 60px "Noto Serif SC"','是我们创造了它还是梦见城市月球太阳星系');await document.fonts.load('600 50px "Noto Serif SC"','城市在自己生长月球成了一台计算机太阳被完全包裹整个星系成了一颗大脑');await document.fonts.ready}catch(e){}
+  for(const s of SHOTS)prog(s.name);window.READY=true;
+  if(q.has('render'))return;
+  let t0=performance.now();const tick=()=>{renderFrame(((performance.now()-t0)/1000)%DUR);requestAnimationFrame(tick)};tick()})();
+</script>
+</body>
+</html>
