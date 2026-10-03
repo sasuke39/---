@@ -12,3 +12,7 @@ out/render_v3.log
 out/*_preview.mp4
 out/v3frames/
 out/v3_strip.png
+out/handstills/
+out/handsheet.png
+out/hand_strip.png
+out/render_hand.log
